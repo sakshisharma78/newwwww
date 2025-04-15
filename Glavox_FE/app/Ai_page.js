@@ -18,16 +18,24 @@ import { Audio } from 'expo-av';
 import { jwtDecode } from 'jwt-decode';
 import { timingService } from '../services/TimingService';
 import * as Speech from 'expo-speech';
+import { LinearGradient } from 'expo-linear-gradient';
 
-const API_URL = 'http://172.16.155.247:5000/api';
-const FLASK_API_URL = 'http://172.16.155.247:5001/api';
+const API_URL = 'http://172.16.157.146:5000/api';
+const FLASK_API_URL = 'http://172.16.157.146:5001/api';
 
-// Add conversation history constants
+// Add conversation history constantsu
 const CONVERSATION_HISTORY_KEY = 'conversation_history';
 const SESSION_START_TIME_KEY = 'session_start_time';
 const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes in milliseconds
 
 const { width } = Dimensions.get('window');
+
+// Update animation constants
+const PULSE_DURATION = 1500;
+const MIN_SCALE = 1;
+const MAX_SCALE = 1.4;
+const SMOOTHING_FACTOR = 0.3;
+const VOICE_SENSITIVITY = 1.2; // Adjust voice sensitivity
 
 // Add token validation function
 const validateToken = async () => {
@@ -72,8 +80,15 @@ export default function AiScreen() {
   const [isRecording, setIsRecording] = useState(false);
   const [recording, setRecording] = useState(null);
   const [conversationHistory, setConversationHistory] = useState([]);
+  const [terminalText, setTerminalText] = useState('');
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const opacityAnim = useRef(new Animated.Value(0.5)).current;
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [showWaveform, setShowWaveform] = useState(true);
+  const [isAnimating, setIsAnimating] = useState(false);
+  const voiceScale = useRef(new Animated.Value(1)).current;
+  const meeterInterval = useRef(null);
+  const prevMeteringValue = useRef(-160);
 
   // Add useEffect for conversation history management
   useEffect(() => {
@@ -152,29 +167,46 @@ export default function AiScreen() {
     await endConversation();
   };
 
-  // Animation for the mic button
+  // Update animation effect
   useEffect(() => {
-    if (isRecording) {
+    if (isSpeaking) {
       Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulseAnim, {
-            toValue: 1.2,
-            duration: 1000,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
-          Animated.timing(pulseAnim, {
-            toValue: 1,
-            duration: 1000,
-            easing: Easing.inOut(Easing.ease),
-            useNativeDriver: true,
-          }),
+        Animated.parallel([
+          Animated.sequence([
+            Animated.timing(pulseAnim, {
+              toValue: 1.2,
+              duration: PULSE_DURATION,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(pulseAnim, {
+              toValue: 1,
+              duration: PULSE_DURATION,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
+          Animated.sequence([
+            Animated.timing(opacityAnim, {
+              toValue: 0.8,
+              duration: PULSE_DURATION,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+            Animated.timing(opacityAnim, {
+              toValue: 0.5,
+              duration: PULSE_DURATION,
+              easing: Easing.inOut(Easing.ease),
+              useNativeDriver: true,
+            }),
+          ]),
         ])
       ).start();
     } else {
       pulseAnim.setValue(1);
+      opacityAnim.setValue(0.5);
     }
-  }, [isRecording]);
+  }, [isSpeaking]);
 
   // Clean up sound and recording when component unmounts
   useEffect(() => {
@@ -227,22 +259,65 @@ export default function AiScreen() {
     };
   }, []);
 
+  // Improved voice meter function
+  const startVoiceMeter = async () => {
+    if (recording) {
+      setIsAnimating(true);
+      meeterInterval.current = setInterval(async () => {
+        try {
+          const status = await recording.getStatusAsync();
+          if (status.isRecording) {
+            const metering = Math.max(status.metering || -160, -160); // Clamp minimum value
+            const delta = Math.abs(metering - prevMeteringValue.current);
+            
+            // Only update animation if there's significant change in voice level
+            if (delta > 1) {
+              prevMeteringValue.current = metering;
+              
+              // Enhanced voice level to scale mapping
+              const normalizedValue = Math.pow((metering + 160) / 160, VOICE_SENSITIVITY);
+              const newScale = MIN_SCALE + (normalizedValue * (MAX_SCALE - MIN_SCALE));
+
+              // Smooth animation based on voice intensity
+              Animated.timing(voiceScale, {
+                toValue: newScale,
+                duration: 50, // Faster response time
+                easing: Easing.out(Easing.ease),
+                useNativeDriver: true,
+              }).start();
+            }
+          }
+        } catch (error) {
+          console.error('Error getting audio metering:', error);
+        }
+      }, 50); // More frequent updates for smoother animation
+    }
+  };
+
+  const stopVoiceMeter = () => {
+    setIsAnimating(false);
+    if (meeterInterval.current) {
+      clearInterval(meeterInterval.current);
+      meeterInterval.current = null;
+    }
+    // Smooth transition to static state
+    Animated.timing(voiceScale, {
+      toValue: MIN_SCALE,
+      duration: 150,
+      easing: Easing.out(Easing.ease),
+      useNativeDriver: true,
+    }).start();
+    prevMeteringValue.current = -160;
+  };
+
   // Modify startRecording
   const startRecording = async () => {
-    console.log("startRecording initiated..");
     try {
-      // Stop any existing recording
       if (recording) {
-        console.log("recording is : ", recording);
-        await recording.stopAndUnloadAsync();
-        setRecording(null);
+        await stopRecording();
+        return;
       }
 
-      // Start speaking tracking
-      await timingService.startSpeakingTracking();
-      setIsSpeaking(true);
-
-      setIsRecording(true);
       await Audio.requestPermissionsAsync();
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
@@ -251,15 +326,39 @@ export default function AiScreen() {
       });
 
       const { recording: newRecording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
+        {
+          ...Audio.RecordingOptionsPresets.HIGH_QUALITY,
+          android: {
+            ...Audio.RecordingOptionsPresets.HIGH_QUALITY.android,
+            meteringEnabled: true,
+          },
+          ios: {
+            ...Audio.RecordingOptionsPresets.HIGH_QUALITY.ios,
+            meteringEnabled: true,
+          },
+        },
+        (status) => {
+          if (status.isRecording && status.metering !== undefined) {
+            const metering = Math.max(status.metering, -160);
+            const normalizedValue = Math.pow((metering + 160) / 160, VOICE_SENSITIVITY);
+            const newScale = MIN_SCALE + (normalizedValue * (MAX_SCALE - MIN_SCALE));
+            voiceScale.setValue(newScale);
+          }
+        },
+        50
       );
 
       setRecording(newRecording);
+      setIsRecording(true);
+      setIsSpeaking(true);
+      await timingService.startSpeakingTracking();
+      startVoiceMeter();
     } catch (error) {
       console.error('Recording error:', error);
       Alert.alert('Error', 'Failed to start recording');
       setIsRecording(false);
       setIsSpeaking(false);
+      setIsAnimating(false);
     }
   };
 
@@ -268,6 +367,7 @@ export default function AiScreen() {
     try {
       setIsRecording(false);
       setIsSpeaking(false);
+      setShowWaveform(false);
       
       if (!recording) return;
 
@@ -353,7 +453,7 @@ export default function AiScreen() {
 
       // Add timestamp to prevent caching
       const timestamp = new Date().getTime();
-      const urlWithTimestamp = `http://172.16.155.247:5000${audioUrl}`;
+      const urlWithTimestamp = `http://172.16.157.146:5000${audioUrl}`;
       console.log(urlWithTimestamp);
 
       // Load and play the new sound
@@ -416,6 +516,9 @@ export default function AiScreen() {
       };
       await saveConversationHistory(aiMessage);
 
+      // Update terminal text
+      setTerminalText(response.data.message);
+
       // Play audio response
       if (response.data.audioUrl) {
         await playAudio(response.data.audioUrl);
@@ -449,10 +552,47 @@ export default function AiScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* MetaHuman Image with Animation */}
-      <Animated.View style={[styles.metahumanContainer, { transform: [{ scale: pulseAnim }] }]}>
-        <Image source={require('../assets/images/metahuman.png')} style={styles.metahuman} />
-      </Animated.View>
+      {/* Voice Circle */}
+      <View style={styles.voiceCircleContainer}>
+        <View style={styles.voiceCircleWrapper}>
+          {/* Static Circle */}
+          <LinearGradient
+            colors={['rgba(100, 200, 255, 0.3)', 'rgba(255, 255, 255, 0.3)']}
+            style={styles.staticCircle}
+          />
+          
+          {/* Animated Circle */}
+          <Animated.View
+            style={[
+              styles.animatedCircleContainer,
+              {
+                transform: [{ scale: voiceScale }],
+                opacity: isAnimating ? 0.7 : 0.3,
+              },
+            ]}
+          >
+            <LinearGradient
+              colors={['rgba(100, 200, 255, 0.7)', 'rgba(255, 255, 255, 0.7)']}
+              style={styles.animatedCircle}
+            />
+          </Animated.View>
+        </View>
+      </View>
+
+      {/* Terminal Window */}
+      <View style={styles.terminalContainer}>
+        <View style={styles.terminalHeader}>
+          <View style={styles.terminalButtons}>
+            <View style={[styles.terminalButton, styles.closeButton]} />
+            <View style={[styles.terminalButton, styles.minimizeButton]} />
+            <View style={[styles.terminalButton, styles.maximizeButton]} />
+          </View>
+          <Text style={styles.terminalTitle}>FRIDAY THINKS</Text>
+        </View>
+        <View style={styles.terminalContent}>
+          <Text style={styles.terminalText}>{terminalText}</Text>
+        </View>
+      </View>
 
       {/* Loading Indicator */}
       {isLoading && (
@@ -522,34 +662,96 @@ const styles = StyleSheet.create({
     resizeMode: 'contain',
   },
   profileIcon: { width: 30, height: 30, resizeMode: 'contain' },
-  metahumanContainer: {
-    alignItems: 'center',
+  waveformContainer: {
+    flex: 1,
     justifyContent: 'center',
+    alignItems: 'center',
     marginTop: 50,
   },
-  metahuman: {
-    width: width * 0.8,
-    height: width * 0.8,
-    resizeMode: 'contain',
+  waveform: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 100,
+    width: '80%',
   },
-  responseContainer: {
+  staticWaveform: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: 100,
+    width: '80%',
+  },
+  waveformBar: {
+    width: 4,
+    height: 30,
+    backgroundColor: 'rgba(0, 255, 0, 0.5)',
+    marginHorizontal: 2,
+    borderRadius: 2,
+  },
+  staticWaveformBar: {
+    width: 4,
+    height: 30,
+    backgroundColor: 'rgba(0, 255, 0, 0.3)',
+    marginHorizontal: 2,
+    borderRadius: 2,
+  },
+  terminalContainer: {
     position: 'absolute',
     bottom: 150,
     left: 20,
     right: 20,
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
-    padding: 15,
+    backgroundColor: '#1e1e1e',
     borderRadius: 10,
+    overflow: 'hidden',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.25,
     shadowRadius: 3.84,
     elevation: 5,
   },
-  responseText: {
-    fontSize: 16,
-    color: '#333',
-    textAlign: 'center',
+  terminalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2d2d2d',
+    padding: 10,
+    borderTopLeftRadius: 10,
+    borderTopRightRadius: 10,
+  },
+  terminalButtons: {
+    flexDirection: 'row',
+    marginRight: 10,
+  },
+  terminalButton: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 6,
+  },
+  closeButton: {
+    backgroundColor: '#ff5f56',
+  },
+  minimizeButton: {
+    backgroundColor: '#ffbd2e',
+  },
+  maximizeButton: {
+    backgroundColor: '#27c93f',
+  },
+  terminalTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  terminalContent: {
+    padding: 15,
+    minHeight: 100,
+    maxHeight: 200,
+  },
+  terminalText: {
+    color: '#00ff00',
+    fontSize: 14,
+    fontFamily: 'monospace',
+    lineHeight: 20,
   },
   loadingContainer: {
     position: 'absolute',
@@ -596,9 +798,42 @@ const styles = StyleSheet.create({
   recordingText: {
     position: 'absolute',
     bottom: 120,
+    
     alignSelf: 'center',
     color: '#ff4444',
     fontSize: 16,
     fontWeight: 'bold',
+  },
+  voiceCircleContainer: {
+    position: 'absolute',
+    top: '30%',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  voiceCircleWrapper: {
+    width: 150,
+    height: 150,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  staticCircle: {
+    position: 'absolute',
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: 'transparent',
+  },
+  animatedCircleContainer: {
+    position: 'absolute',
+    width: 150,
+    height: 150,
+  },
+  animatedCircle: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 75,
+    backgroundColor: 'transparent',
   },
 });

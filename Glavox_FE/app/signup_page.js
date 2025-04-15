@@ -15,7 +15,7 @@ import Ionicons from "react-native-vector-icons/Ionicons";
 import axios from 'axios';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API_URL = 'http://172.16.155.247:5000/api';
+const API_URL = 'http://172.16.157.146:5000/api';
 
 export default function SignupScreen() {
   const [name, setName] = useState("");
